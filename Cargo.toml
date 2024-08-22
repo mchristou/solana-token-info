@@ -17,4 +17,4 @@ mpl-token-metadata = "4.1.2"
 tokio = { version = "1.38.0", features = ["rt-multi-thread", "macros", "net", "io-util", "fs"]}
 thiserror = "1.0.61"
 eyre = "0.6.12"
-lazy_static = "1.5.0"
+futures = "0.3.30"

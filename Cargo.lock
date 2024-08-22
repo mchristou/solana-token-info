@@ -3953,7 +3953,7 @@ version = "0.1.0"
 dependencies = [
  "argh",
  "eyre",
- "lazy_static",
+ "futures",
  "mpl-token-metadata",
  "reqwest",
  "serde",

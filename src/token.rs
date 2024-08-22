@@ -1,19 +1,16 @@
 use mpl_token_metadata::accounts::Metadata;
-use reqwest;
 use serde_json::Value;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::fmt;
-use std::{collections::HashMap, ops::Deref};
-use tracing::{error, warn};
+use std::{collections::HashMap, fmt, ops::Deref};
+use tokio::sync::OnceCell;
+use tracing::warn;
 
 use crate::error::{Error, Result};
 
 const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 
-lazy_static::lazy_static! {
-    static ref RPC_CLIENT: RpcClient = RpcClient::new(RPC_URL.to_string());
-}
+static RPC_CLIENT: OnceCell<RpcClient> = OnceCell::const_new();
 
 #[derive(Debug)]
 pub struct TokenInfo {
@@ -40,7 +37,7 @@ impl TokenInfo {
                 HashMap::new()
             }
             Err(e) => {
-                error!("{e}");
+                warn!("{e}");
                 HashMap::new()
             }
         };
@@ -55,7 +52,12 @@ impl TokenInfo {
 
 impl TokenAccountInfo {
     pub async fn new(pubkey: Pubkey) -> Result<Self> {
-        let ui_token_amount = RPC_CLIENT.get_token_supply(&pubkey).await?;
+        let ui_token_amount = RPC_CLIENT
+            .get_or_init(|| async { RpcClient::new(RPC_URL.to_string()) })
+            .await
+            .get_token_supply(&pubkey)
+            .await?;
+
         let total_supply = Self::format_amount(ui_token_amount.amount, ui_token_amount.decimals)?;
         Ok(Self { total_supply })
     }
@@ -92,7 +94,12 @@ pub struct TokenMetadata {
 impl TokenMetadata {
     pub async fn new(pubkey: Pubkey) -> Result<Self> {
         let (pubkey_metadata, _) = mpl_token_metadata::accounts::Metadata::find_pda(&pubkey);
-        let account = RPC_CLIENT.get_account(&pubkey_metadata).await?;
+        let account = RPC_CLIENT
+            .get_or_init(|| async { RpcClient::new(RPC_URL.to_string()) })
+            .await
+            .get_account(&pubkey_metadata)
+            .await?;
+
         let metadata = Metadata::from_bytes(&account.data)?;
 
         Ok(Self { metadata })
@@ -153,6 +160,12 @@ impl Deref for TokenMetadata {
     }
 }
 
+impl fmt::Display for TokenAccountInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "total supply: {}", self.total_supply)
+    }
+}
+
 impl fmt::Display for TokenInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -169,64 +182,43 @@ impl fmt::Display for TokenInfo {
     }
 }
 
-impl fmt::Display for TokenAccountInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "information collected from account:\ntotal supply: {}",
-            self.total_supply.to_lowercase()
-        )
-    }
-}
-
 impl fmt::Display for TokenMetadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "information collected from metadata:\nkey: {:?}\nupdate authority: {}\nmint: {}\nname: {}\nsymbol: {}\nuri: {}\nseller fee basis points: {}\n",
+            "information collected from metadata:\n\
+            key: {:?}\n\
+            update authority: {}\n\
+            mint: {}\n\
+            name: {}\n\
+            symbol: {}\n\
+            uri: {}\n\
+            seller fee basis points: {}\n\
+            creators: {:?}\n\
+            primary sale happened: {}\n\
+            is mutable: {}\n\
+            edition nonce: {:?}\n\
+            token standard: {:?}\n\
+            collection: {:?}\n\
+            uses: {:?}\n\
+            collection details: {:?}\n\
+            programmable config: {:?}\n",
             self.metadata.key,
             self.metadata.update_authority,
             self.metadata.mint,
             self.metadata.name,
             self.metadata.symbol,
             self.metadata.uri,
-            self.metadata.seller_fee_basis_points
-        )?;
-
-        if let Some(creators) = &self.metadata.creators {
-            write!(f, "creators: {:?}\n", creators)?;
-        }
-
-        write!(
-            f,
-            "primary sale happened: {}\nis mutable: {}\n",
-            self.metadata.primary_sale_happened, self.metadata.is_mutable
-        )?;
-
-        if let Some(edition_nonce) = self.metadata.edition_nonce {
-            write!(f, "edition nonce: {}\n", edition_nonce)?;
-        }
-
-        if let Some(token_standard) = &self.metadata.token_standard {
-            write!(f, "token standard: {:?}\n", token_standard)?;
-        }
-
-        if let Some(collection) = &self.metadata.collection {
-            write!(f, "collection: {:?}\n", collection)?;
-        }
-
-        if let Some(uses) = &self.metadata.uses {
-            write!(f, "uses: {:?}\n", uses)?;
-        }
-
-        if let Some(collection_details) = &self.metadata.collection_details {
-            write!(f, "collection details: {:?}\n", collection_details)?;
-        }
-
-        if let Some(programmable_config) = &self.metadata.programmable_config {
-            write!(f, "programmable config: {:?}\n", programmable_config)?;
-        }
-
-        Ok(())
+            self.metadata.seller_fee_basis_points,
+            self.metadata.creators,
+            self.metadata.primary_sale_happened,
+            self.metadata.is_mutable,
+            self.metadata.edition_nonce,
+            self.metadata.token_standard,
+            self.metadata.collection,
+            self.metadata.uses,
+            self.metadata.collection_details,
+            self.metadata.programmable_config
+        )
     }
 }
