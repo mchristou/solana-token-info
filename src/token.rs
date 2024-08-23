@@ -2,9 +2,13 @@ use mpl_token_metadata::accounts::Metadata;
 use serde_json::Value;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::{collections::HashMap, fmt, ops::Deref};
+use std::{collections::HashMap, ops::Deref};
 use tokio::sync::OnceCell;
 use tracing::{debug, error, instrument, trace};
+use trust_dns_resolver::{
+    config::{ResolverConfig, ResolverOpts},
+    AsyncResolver,
+};
 
 use crate::error::{Error, Result};
 
@@ -195,7 +199,7 @@ impl TokenMetadata {
         let mut additional_info = HashMap::new();
 
         if uri.is_empty() || uri.bytes().all(|b| b == 0) {
-            trace!("Metadata do not include uri, website will not be retrieved");
+            trace!("Metadata do not include uri, website and additional information will not be retrieved");
             return Ok(additional_info);
         }
 
@@ -221,10 +225,7 @@ impl TokenMetadata {
             let trimmed_website = website
                 .trim_matches(|c| c == '"' || c == ' ')
                 .trim_start_matches("https://");
-            let resolver = trust_dns_resolver::AsyncResolver::tokio(
-                trust_dns_resolver::config::ResolverConfig::default(),
-                trust_dns_resolver::config::ResolverOpts::default(),
-            );
+            let resolver = AsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
             let response = resolver.lookup_ip(trimmed_website).await.unwrap();
             let count = response.iter().count();
 
@@ -243,72 +244,5 @@ impl Deref for TokenMetadata {
 
     fn deref(&self) -> &Self::Target {
         &self.metadata
-    }
-}
-
-impl fmt::Display for TokenAccountInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "total supply: {}", self.total_supply)
-    }
-}
-
-impl fmt::Display for TokenInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(metadata) = self.metadata.as_ref() {
-            write!(
-                f,
-                "\n{}\n\n{}\ninformation retrieved using uri:\n{}",
-                self.account_info,
-                metadata,
-                self.additional_info
-                    .iter()
-                    .map(|(key, value)| format!("{}: {}", key.to_lowercase(), value.to_lowercase()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        } else {
-            write!(f, "\n{}", self.account_info,)
-        }
-    }
-}
-
-impl fmt::Display for TokenMetadata {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "information collected from metadata:\n\
-            key: {:?}\n\
-            update authority: {}\n\
-            mint: {}\n\
-            name: {}\n\
-            symbol: {}\n\
-            uri: {}\n\
-            seller fee basis points: {}\n\
-            creators: {:?}\n\
-            primary sale happened: {}\n\
-            is mutable: {}\n\
-            edition nonce: {:?}\n\
-            token standard: {:?}\n\
-            collection: {:?}\n\
-            uses: {:?}\n\
-            collection details: {:?}\n\
-            programmable config: {:?}\n",
-            self.metadata.key,
-            self.metadata.update_authority,
-            self.metadata.mint,
-            self.metadata.name,
-            self.metadata.symbol,
-            self.metadata.uri,
-            self.metadata.seller_fee_basis_points,
-            self.metadata.creators,
-            self.metadata.primary_sale_happened,
-            self.metadata.is_mutable,
-            self.metadata.edition_nonce,
-            self.metadata.token_standard,
-            self.metadata.collection,
-            self.metadata.uses,
-            self.metadata.collection_details,
-            self.metadata.programmable_config
-        )
     }
 }

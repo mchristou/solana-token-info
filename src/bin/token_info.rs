@@ -24,7 +24,7 @@ struct TokenInfoArgs {
 #[instrument]
 async fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
-        std::env::set_var("RUST_LOG", "warn,solana_token_info=trace,token_info=trace");
+        std::env::set_var("RUST_LOG", "info,solana_token_info=trace");
     }
     tracing_subscriber::fmt::init();
 
@@ -38,9 +38,8 @@ async fn main() -> Result<()> {
             tokio::task::spawn(async move {
                 match TokenInfo::new(pubkey).await {
                     Ok(token_info) => {
-                        info!("Information collected for: {pubkey}");
                         info!(
-                            "Token Info: {}\n\nTime taken: {:?}\n\n",
+                            "\nToken: {pubkey}\n{:#?} Time taken: {:?}\n",
                             token_info,
                             now.elapsed()
                         )
