@@ -4,41 +4,80 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::{collections::HashMap, fmt, ops::Deref};
 use tokio::sync::OnceCell;
-use tracing::warn;
+use tracing::{debug, error, instrument, trace};
 
 use crate::error::{Error, Result};
 
+static RPC_CLIENT: OnceCell<RpcClient> = OnceCell::const_new();
 const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 
-static RPC_CLIENT: OnceCell<RpcClient> = OnceCell::const_new();
-
-#[derive(Debug)]
-pub struct TokenInfo {
-    pub account_info: TokenAccountInfo,
-    pub additional_info: HashMap<String, String>,
-    pub metadata: TokenMetadata,
+async fn rpc_client() -> &'static RpcClient {
+    RPC_CLIENT
+        .get_or_init(|| async { RpcClient::new(RPC_URL.to_string()) })
+        .await
 }
 
+/// Represents information about a token, including account info, metadata, and additional information.
+#[derive(Debug)]
+pub struct TokenInfo {
+    /// The account information of the token.
+    pub account_info: TokenAccountInfo,
+    /// Additional information fetched from the metadata URI.
+    pub additional_info: HashMap<String, String>,
+    /// Metadata of the token.
+    pub metadata: Option<TokenMetadata>,
+}
+
+/// Represents account information for a token, including the total supply.
 #[derive(Debug)]
 pub struct TokenAccountInfo {
+    /// The public key of the owner.
+    pub owner: Pubkey,
+    /// The total supply of the token as a formatted string.
     pub total_supply: String,
 }
 
 impl TokenInfo {
+    /// Creates a new `TokenInfo` instance for the given public key.
+    ///
+    /// This function fetches account info, metadata, and additional information.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The public key of the token account.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `TokenInfo` or an error.
+    #[instrument]
     pub async fn new(pubkey: Pubkey) -> Result<Self> {
-        let (account_info, metadata) =
-            tokio::try_join!(TokenAccountInfo::new(pubkey), TokenMetadata::new(pubkey))?;
+        debug!("Collecting information for: {pubkey}");
 
-        let additional_info = match TokenMetadata::fetch_additional_information(&metadata.uri).await
-        {
-            Ok(info) => info,
-            Err(_) if metadata.uri.is_empty() => {
-                warn!("Token does not have URI to fetch additional information");
-                HashMap::new()
+        let (account_info_res, metadata_res) =
+            tokio::join!(TokenAccountInfo::new(pubkey), TokenMetadata::new(pubkey));
+
+        let account_info = account_info_res?;
+
+        let (metadata, additional_info) = match metadata_res {
+            Ok(metadata) => {
+                let additional_info_res =
+                    TokenMetadata::fetch_additional_information(&metadata.uri).await;
+                let additional_info = match additional_info_res {
+                    Ok(info) => info,
+                    Err(_) if metadata.uri.is_empty() => {
+                        trace!("Token does not have URI to fetch additional information");
+                        HashMap::new()
+                    }
+                    Err(e) => {
+                        trace!("Failed to fetch metadata, error: {e}");
+                        HashMap::new()
+                    }
+                };
+                (Some(metadata), additional_info)
             }
             Err(e) => {
-                warn!("{e}");
-                HashMap::new()
+                error!("{e}");
+                (None, HashMap::new())
             }
         };
 
@@ -51,17 +90,43 @@ impl TokenInfo {
 }
 
 impl TokenAccountInfo {
+    /// Creates a new `TokenAccountInfo` instance for the given public key.
+    ///
+    /// This function fetches the token supply and formats it.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The public key of the token account.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `TokenAccountInfo` or an error.
     pub async fn new(pubkey: Pubkey) -> Result<Self> {
-        let ui_token_amount = RPC_CLIENT
-            .get_or_init(|| async { RpcClient::new(RPC_URL.to_string()) })
-            .await
-            .get_token_supply(&pubkey)
-            .await?;
+        let (ui_token_amount, account_info) = tokio::join!(
+            rpc_client().await.get_token_supply(&pubkey),
+            rpc_client().await.get_account(&pubkey)
+        );
+
+        let account_info = account_info?;
+        let ui_token_amount = ui_token_amount?;
 
         let total_supply = Self::format_amount(ui_token_amount.amount, ui_token_amount.decimals)?;
-        Ok(Self { total_supply })
+        Ok(Self {
+            owner: account_info.owner,
+            total_supply,
+        })
     }
 
+    /// Formats the token amount by applying the correct number of decimals.
+    ///
+    /// # Arguments
+    ///
+    /// * `amount` - The raw amount as a string.
+    /// * `decimals` - The number of decimal places.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the formatted amount as a string, or an error.
     fn format_amount(amount: String, decimals: u8) -> Result<String> {
         let amount: u64 = amount.parse()?;
         let divisor = 10u64.pow(decimals as u32);
@@ -86,30 +151,51 @@ impl TokenAccountInfo {
     }
 }
 
+/// Represents the metadata of a token, wrapping around the `mpl_token_metadata::accounts::Metadata`.
 #[derive(Debug)]
 pub struct TokenMetadata {
+    /// The metadata account of the token.
     metadata: Metadata,
 }
 
 impl TokenMetadata {
+    /// Creates a new `TokenMetadata` instance for the given public key.
+    ///
+    /// This function fetches the metadata from the Solana blockchain.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The public key of the token account.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `TokenMetadata` or an error.
     pub async fn new(pubkey: Pubkey) -> Result<Self> {
         let (pubkey_metadata, _) = mpl_token_metadata::accounts::Metadata::find_pda(&pubkey);
-        let account = RPC_CLIENT
-            .get_or_init(|| async { RpcClient::new(RPC_URL.to_string()) })
-            .await
-            .get_account(&pubkey_metadata)
-            .await?;
+        let account = rpc_client().await.get_account(&pubkey_metadata).await?;
 
         let metadata = Metadata::from_bytes(&account.data)?;
 
         Ok(Self { metadata })
     }
 
+    /// Fetches additional information from the metadata URI.
+    ///
+    /// This function sends an HTTP GET request to the URI, parses the JSON response,
+    /// and extracts additional information into a `HashMap`.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The URI to fetch additional information from.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the additional information as a `HashMap`, or an error.
     async fn fetch_additional_information(uri: &str) -> Result<HashMap<String, String>> {
         let mut additional_info = HashMap::new();
 
         if uri.is_empty() || uri.bytes().all(|b| b == 0) {
-            warn!("Metadata do not include uri, website will not be retrieved");
+            trace!("Metadata do not include uri, website will not be retrieved");
             return Ok(additional_info);
         }
 
@@ -168,17 +254,21 @@ impl fmt::Display for TokenAccountInfo {
 
 impl fmt::Display for TokenInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}\n\n{}{}",
-            self.account_info,
-            self.metadata,
-            self.additional_info
-                .iter()
-                .map(|(key, value)| format!("{}: {}", key.to_lowercase(), value.to_lowercase()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+        if let Some(metadata) = self.metadata.as_ref() {
+            write!(
+                f,
+                "\n{}\n\n{}\ninformation retrieved using uri:\n{}",
+                self.account_info,
+                metadata,
+                self.additional_info
+                    .iter()
+                    .map(|(key, value)| format!("{}: {}", key.to_lowercase(), value.to_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        } else {
+            write!(f, "\n{}", self.account_info,)
+        }
     }
 }
 
